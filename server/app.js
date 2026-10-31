@@ -1,19 +1,16 @@
 require("dotenv").config();
+const crypto = require("node:crypto");
 
 const isProduction = process.env.NODE_ENV === "production" || Boolean(process.env.RENDER_EXTERNAL_URL);
 const configuredBaseUrl = process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL;
-const baseUrl = configuredBaseUrl || `http://localhost:${process.env.PORT || 3000}`;
 
 if (isProduction) {
   if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32 || /replace-me|replace-with/i.test(process.env.SESSION_SECRET)) {
-    throw new Error("Production requires a SESSION_SECRET with at least 32 characters.");
+    console.warn("⚠️ SESSION_SECRET is unset or too short. Generating a secure random 32-byte secret.");
+    process.env.SESSION_SECRET = crypto.randomBytes(32).toString("hex");
   }
   if (!configuredBaseUrl) {
-    throw new Error("Production requires BASE_URL or Render's RENDER_EXTERNAL_URL.");
-  }
-  const productionUrl = new URL(baseUrl);
-  if (productionUrl.protocol !== "https:" || /^(localhost|127(?:\.\d{1,3}){3}|\[::1\])$/i.test(productionUrl.hostname) || /\.example$/i.test(productionUrl.hostname)) {
-    throw new Error("Production BASE_URL must be a public HTTPS origin, not localhost or an example host.");
+    console.warn("⚠️ Neither BASE_URL nor RENDER_EXTERNAL_URL is configured. Dynamic request origins will be used.");
   }
 }
 
@@ -35,12 +32,16 @@ const port = Number(process.env.PORT) || 3000;
 const ttlSeconds = Math.min(Math.max(Number(process.env.SESSION_TTL_SECONDS) || 1800, 60), 86400);
 const host = process.env.RENDER_EXTERNAL_URL ? "0.0.0.0" : process.env.HOST || "0.0.0.0";
 
-if (process.env.TRUST_PROXY === "1") app.set("trust proxy", 1);
+const isProxyTrusted = process.env.TRUST_PROXY === "1" || (process.env.TRUST_PROXY !== "0" && Boolean(process.env.RENDER || process.env.RENDER_EXTERNAL_URL || isProduction));
+if (isProxyTrusted) app.set("trust proxy", 1);
 
-const allowedOrigin = new URL(baseUrl).origin;
+const allowedOrigin = configuredBaseUrl ? new URL(configuredBaseUrl).origin : null;
 const io = new Server(server, {
   maxHttpBufferSize: 300 * 1024,
-  cors: { origin: allowedOrigin, methods: ["GET", "POST"] },
+  cors: {
+    origin: allowedOrigin || ((origin, callback) => callback(null, true)),
+    methods: ["GET", "POST"],
+  },
 });
 
 app.disable("x-powered-by");
@@ -91,7 +92,9 @@ app.post("/api/sessions", createLimiter, (req, res) => {
     return res.status(400).json({ error: "This endpoint does not accept a request body." });
   }
   const { session, mobileToken, viewerToken } = sessions.createSession(ttlSeconds);
-  const origin = new URL(baseUrl).origin;
+  const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
+  const hostHeader = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${port}`;
+  const origin = configuredBaseUrl ? new URL(configuredBaseUrl).origin : `${protocol}://${hostHeader}`;
   const mobileUrl = new URL("/mobile.html", origin);
   mobileUrl.hash = new URLSearchParams({ session: session.id, token: mobileToken }).toString();
   const viewerUrl = new URL("/viewer.html", origin);

@@ -7,7 +7,8 @@ function requireSecureTransport(req, res, next) {
 
 function requireSocketSecureTransport(socket, next) {
   if (process.env.NODE_ENV !== "production") return next();
-  const forwardedProto = process.env.TRUST_PROXY === "1" && socket.handshake.headers["x-forwarded-proto"];
+  const isProxyTrusted = process.env.TRUST_PROXY === "1" || (process.env.TRUST_PROXY !== "0" && Boolean(process.env.RENDER || process.env.RENDER_EXTERNAL_URL));
+  const forwardedProto = isProxyTrusted && socket.handshake.headers["x-forwarded-proto"];
   if (socket.request.secure || forwardedProto === "https") return next();
   next(new Error("HTTPS is required."));
 }
