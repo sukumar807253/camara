@@ -1,0 +1,26 @@
+{
+  "name": "device-stream-hub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Private, consent-based WebRTC camera streaming between a mobile device and a viewer.",
+  "main": "server/app.js",
+  "scripts": {
+    "start": "node server/app.js",
+    "dev": "node --watch server/app.js",
+    "check": "node --check server/app.js && node --check server/signaling.js && node --check server/sessionManager.js && node --check server/middleware/auth.js && node --check server/middleware/security.js && node --check config/iceServers.js && node --check client/js/app.js && node --check client/js/mobile.js && node --check client/js/viewer.js && node --check test/sessionManager.test.js && node --check test/signaling.test.js && node --check test/iceServers.test.js && node --check test/security.test.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.4"
+  }
+}
