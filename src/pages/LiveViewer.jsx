@@ -539,6 +539,14 @@ export default function LiveViewer() {
             </span>
           </div>
 
+          {/* Background / Reconnecting banner if mobile disconnected briefly */}
+          {isVideoActive && !mobileStatus.connected && (
+            <div className="absolute top-14 left-4 z-20 px-3 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-medium backdrop-blur-md flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+              <span>Phone temporarily in background · waiting to resume…</span>
+            </div>
+          )}
+
           {/* Floating Tap to Unmute Overlay */}
           {isVideoActive && isViewerAudioMuted && (
             <button

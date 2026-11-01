@@ -628,6 +628,7 @@ export default function MobileCamera() {
             autoPlay
             playsInline
             muted
+            autoPictureInPicture="true"
             onEnterPictureInPicture={() => setIsPipActive(true)}
             onLeavePictureInPicture={() => setIsPipActive(false)}
             className={`w-full h-full object-cover transition-opacity duration-300 ${
