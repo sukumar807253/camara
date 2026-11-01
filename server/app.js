@@ -83,7 +83,7 @@ app.get("/healthz", (req, res) => {
   res.set("Cache-Control", "no-store").status(200).json({ status: "ok" });
 });
 app.use((req, res, next) => {
-  res.setHeader("Permissions-Policy", "camera=(self), microphone=()");
+  res.setHeader("Permissions-Policy", "camera=(self), microphone=(self)");
   next();
 });
 app.use(requireSecureTransport);

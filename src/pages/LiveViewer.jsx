@@ -20,7 +20,11 @@ import {
   Zap,
   FlipHorizontal,
   Download,
-  X
+  X,
+  Mic,
+  MicOff,
+  Volume2,
+  VolumeX
 } from 'lucide-react';
 
 export default function LiveViewer() {
@@ -33,8 +37,11 @@ export default function LiveViewer() {
     torchSupported: false,
     torchActive: false,
     cameraActive: false,
+    micMuted: false,
     isSwitching: false,
   });
+  const [isViewerAudioMuted, setIsViewerAudioMuted] = useState(true);
+  const [viewerVolume, setViewerVolume] = useState(1);
   const [isMirrored, setIsMirrored] = useState(false);
   const [snapshotUrl, setSnapshotUrl] = useState(null);
   const [qualityLabel, setQualityLabel] = useState('Not connected');
@@ -212,6 +219,7 @@ export default function LiveViewer() {
       peerRef.current = null;
     }
     pendingCandidatesRef.current = [];
+    remoteStreamRef.current = null;
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
@@ -227,12 +235,17 @@ export default function LiveViewer() {
     peerRef.current = peer;
 
     peer.ontrack = (event) => {
-      console.log('🎥 LiveViewer ontrack event received!', event.streams, event.track);
-      const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
-      remoteStreamRef.current = stream;
+      console.log('🎥 LiveViewer ontrack event received!', event.streams, event.track.kind);
+      if (!remoteStreamRef.current) {
+        remoteStreamRef.current = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream();
+      }
+      if (remoteStreamRef.current && !remoteStreamRef.current.getTracks().some((t) => t.id === event.track.id)) {
+        remoteStreamRef.current.addTrack(event.track);
+      }
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.muted = true;
+        if (videoRef.current.srcObject !== remoteStreamRef.current) {
+          videoRef.current.srcObject = remoteStreamRef.current;
+        }
         setIsVideoActive(true);
         videoRef.current.play().catch((err) => console.warn('Autoplay error:', err));
       }
@@ -363,6 +376,37 @@ export default function LiveViewer() {
     socketRef.current.emit('camera-control', { action: 'toggle-torch' });
   };
 
+  const handleRemoteToggleMic = () => {
+    if (!socketRef.current?.connected) return;
+    socketRef.current.emit('camera-control', { action: 'toggle-mic' });
+  };
+
+  const handleToggleViewerAudio = () => {
+    if (!videoRef.current) return;
+    const nextMuted = !isViewerAudioMuted;
+    videoRef.current.muted = nextMuted;
+    setIsViewerAudioMuted(nextMuted);
+    if (!nextMuted) {
+      videoRef.current.volume = viewerVolume;
+      videoRef.current.play().catch((err) => console.warn('Audio play error:', err));
+    }
+  };
+
+  const handleVolumeChange = (e) => {
+    const val = parseFloat(e.target.value);
+    setViewerVolume(val);
+    if (videoRef.current) {
+      videoRef.current.volume = val;
+      if (val > 0 && isViewerAudioMuted) {
+        videoRef.current.muted = false;
+        setIsViewerAudioMuted(false);
+      } else if (val === 0 && !isViewerAudioMuted) {
+        videoRef.current.muted = true;
+        setIsViewerAudioMuted(true);
+      }
+    }
+  };
+
   const handleCaptureSnapshot = () => {
     const video = videoRef.current;
     if (!video || !isVideoActive) return;
@@ -460,7 +504,7 @@ export default function LiveViewer() {
             ref={videoRef}
             autoPlay
             playsInline
-            muted
+            muted={isViewerAudioMuted}
             onLoadedMetadata={() => {
               console.log('🎬 Video onLoadedMetadata, playing...');
               videoRef.current?.play().catch(() => {});
@@ -482,7 +526,7 @@ export default function LiveViewer() {
               </div>
               <strong className="text-base font-semibold text-slate-200">Waiting for phone stream</strong>
               <span className="text-xs text-slate-400 mt-1 max-w-sm">
-                Open the invitation link on your phone and tap "Allow camera" to start streaming video here.
+                Open the invitation link on your phone and tap "Allow camera & mic" to start streaming here.
               </span>
             </div>
           )}
@@ -495,15 +539,43 @@ export default function LiveViewer() {
             </span>
           </div>
 
-          {/* Fullscreen Button */}
-          <button
-            type="button"
-            onClick={toggleFullscreen}
-            aria-label="Toggle Fullscreen"
-            className="absolute top-4 right-4 z-10 p-2 rounded-lg bg-slate-950/80 border border-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-900 backdrop-blur-md transition shadow-md"
-          >
-            {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
-          </button>
+          {/* Floating Tap to Unmute Overlay */}
+          {isVideoActive && isViewerAudioMuted && (
+            <button
+              type="button"
+              onClick={handleToggleViewerAudio}
+              className="absolute bottom-4 left-4 z-20 flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-950/90 hover:bg-slate-900 border border-sky-500/40 text-sky-300 hover:text-white text-xs font-semibold backdrop-blur-md shadow-xl transition active:scale-95 group/unmute"
+            >
+              <VolumeX className="w-4 h-4 text-sky-400 group-hover/unmute:scale-110 transition-transform" />
+              <span>Click to Unmute Audio</span>
+            </button>
+          )}
+
+          {/* Controls Overlay in Video Corner */}
+          <div className="absolute top-4 right-4 z-10 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleToggleViewerAudio}
+              aria-label={isViewerAudioMuted ? 'Unmute Audio' : 'Mute Audio'}
+              title={isViewerAudioMuted ? 'Unmute Audio' : 'Mute Audio'}
+              className={`p-2 rounded-lg border backdrop-blur-md transition shadow-md ${
+                isViewerAudioMuted
+                  ? 'bg-slate-950/80 border-slate-800 text-slate-400 hover:text-white'
+                  : 'bg-emerald-950/80 border-emerald-700/80 text-emerald-300 hover:text-emerald-200'
+              }`}
+            >
+              {isViewerAudioMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+            </button>
+
+            <button
+              type="button"
+              onClick={toggleFullscreen}
+              aria-label="Toggle Fullscreen"
+              className="p-2 rounded-lg bg-slate-950/80 border border-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-900 backdrop-blur-md transition shadow-md"
+            >
+              {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+            </button>
+          </div>
         </div>
 
         {/* Remote Mobile Camera Controls Bar */}
@@ -513,16 +585,26 @@ export default function LiveViewer() {
               <Smartphone className="w-5 h-5" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[11px] font-mono font-semibold text-sky-400 uppercase tracking-wider">
                   MOBILE CAMERA CONTROLS
                 </span>
                 <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-slate-800 border border-slate-700 text-slate-300">
                   {remoteCameraInfo.facingMode === 'user' ? 'FRONT CAMERA' : 'REAR / BACK CAMERA'}
                 </span>
+                <span
+                  className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold border flex items-center gap-1 ${
+                    remoteCameraInfo.micMuted
+                      ? 'bg-rose-950/80 border-rose-800 text-rose-300'
+                      : 'bg-emerald-950/80 border-emerald-800 text-emerald-300'
+                  }`}
+                >
+                  {remoteCameraInfo.micMuted ? <MicOff className="w-3 h-3" /> : <Mic className="w-3 h-3" />}
+                  {remoteCameraInfo.micMuted ? 'PHONE MIC MUTED' : 'PHONE MIC LIVE'}
+                </span>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                Switch camera orientation, power, or capture photos remotely from this laptop viewer.
+                Switch camera orientation, mute phone mic, adjust audio, or capture photos remotely from this laptop viewer.
               </p>
             </div>
           </div>
@@ -543,6 +625,60 @@ export default function LiveViewer() {
                   : `Switch to ${remoteCameraInfo.facingMode === 'user' ? 'Back' : 'Front'} Camera`}
               </span>
             </button>
+
+            {/* Remote Phone Mic Toggle */}
+            <button
+              type="button"
+              onClick={handleRemoteToggleMic}
+              disabled={!mobileStatus.connected}
+              title={remoteCameraInfo.micMuted ? 'Unmute Phone Microphone' : 'Mute Phone Microphone'}
+              className={`py-2.5 px-3.5 rounded-xl text-xs font-semibold transition border flex items-center gap-2 disabled:opacity-40 ${
+                remoteCameraInfo.micMuted
+                  ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 hover:bg-rose-500/30'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+              }`}
+            >
+              {remoteCameraInfo.micMuted ? (
+                <>
+                  <MicOff className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Unmute Phone Mic</span>
+                </>
+              ) : (
+                <>
+                  <Mic className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Mute Phone Mic</span>
+                </>
+              )}
+            </button>
+
+            {/* Laptop Audio Volume Slider */}
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-800/80 border border-slate-700">
+              <button
+                type="button"
+                onClick={handleToggleViewerAudio}
+                title={isViewerAudioMuted ? 'Unmute audio on laptop' : 'Mute audio on laptop'}
+                className="text-slate-300 hover:text-white transition"
+              >
+                {isViewerAudioMuted || viewerVolume === 0 ? (
+                  <VolumeX className="w-4 h-4 text-rose-400" />
+                ) : (
+                  <Volume2 className="w-4 h-4 text-emerald-400" />
+                )}
+              </button>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={isViewerAudioMuted ? 0 : viewerVolume}
+                onChange={handleVolumeChange}
+                className="w-16 sm:w-20 h-1.5 accent-sky-400 bg-slate-700 rounded-lg cursor-pointer"
+                title={`Volume: ${Math.round((isViewerAudioMuted ? 0 : viewerVolume) * 100)}%`}
+              />
+              <span className="text-[10px] font-mono text-slate-400 w-6 text-right">
+                {isViewerAudioMuted ? '0%' : `${Math.round(viewerVolume * 100)}%`}
+              </span>
+            </div>
 
             {/* Toggle Camera On/Off */}
             <button

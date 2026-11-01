@@ -12,7 +12,9 @@ import {
   AlertTriangle, 
   Info, 
   ShieldAlert,
-  Radio
+  Radio,
+  Mic,
+  MicOff
 } from 'lucide-react';
 
 export default function MobileCamera() {
@@ -24,6 +26,8 @@ export default function MobileCamera() {
   const facingModeRef = useRef('environment');
   const [torchActive, setTorchActive] = useState(false);
   const torchActiveRef = useRef(false);
+  const [isMicMuted, setIsMicMuted] = useState(false);
+  const isMicMutedRef = useRef(false);
   const [connectionStatus, setConnectionStatus] = useState({ connected: false, text: 'Checking invitation…' });
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [errorMessage, setErrorMessage] = useState('');
@@ -148,6 +152,8 @@ export default function MobileCamera() {
         }
       } else if (payload.action === 'toggle-torch') {
         await controlHandlersRef.current.toggleTorch?.();
+      } else if (payload.action === 'toggle-mic') {
+        controlHandlersRef.current.toggleMic?.();
       }
     });
 
@@ -298,16 +304,36 @@ export default function MobileCamera() {
     }
   };
 
-  const sendCameraInfo = (fMode = facingModeRef.current, active = Boolean(streamRef.current), torch = torchActiveRef.current) => {
+  const sendCameraInfo = (
+    fMode = facingModeRef.current,
+    active = Boolean(streamRef.current),
+    torch = torchActiveRef.current,
+    micMuted = isMicMutedRef.current
+  ) => {
     if (!socketRef.current?.connected) return;
-    const track = streamRef.current?.getVideoTracks()[0];
-    const capabilities = track?.getCapabilities?.() || {};
+    const vTrack = streamRef.current?.getVideoTracks()[0];
+    const aTrack = streamRef.current?.getAudioTracks()[0];
+    const capabilities = vTrack?.getCapabilities?.() || {};
     socketRef.current.emit('camera-info', {
       facingMode: fMode,
       cameraActive: active,
       torchSupported: Boolean(capabilities.torch),
       torchActive: torch,
+      micSupported: Boolean(aTrack),
+      micActive: Boolean(aTrack && !micMuted),
+      micMuted: Boolean(micMuted),
     });
+  };
+
+  const handleToggleMic = () => {
+    const audioTrack = streamRef.current?.getAudioTracks()[0];
+    const nextMuted = !isMicMutedRef.current;
+    if (audioTrack) {
+      audioTrack.enabled = !nextMuted;
+    }
+    isMicMutedRef.current = nextMuted;
+    setIsMicMuted(nextMuted);
+    sendCameraInfo(facingModeRef.current, Boolean(streamRef.current), torchActiveRef.current, nextMuted);
   };
 
   const handleStartCamera = async () => {
@@ -316,7 +342,7 @@ export default function MobileCamera() {
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia) {
-      setErrorMessage('Camera access requires HTTPS and a supported mobile browser.');
+      setErrorMessage('Camera and microphone access requires HTTPS and a supported mobile browser.');
       return;
     }
 
@@ -324,10 +350,19 @@ export default function MobileCamera() {
     setCameraLoading(true);
 
     try {
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facingModeRef.current } },
-        audio: false,
-      });
+      let newStream;
+      try {
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: facingModeRef.current } },
+          audio: true,
+        });
+      } catch (audioErr) {
+        console.warn('Audio capture failed, falling back to video-only:', audioErr);
+        newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: facingModeRef.current } },
+          audio: false,
+        });
+      }
 
       cleanupStream();
       streamRef.current = newStream;
@@ -338,31 +373,33 @@ export default function MobileCamera() {
       setIsCameraActive(true);
       torchActiveRef.current = false;
       setTorchActive(false);
+      isMicMutedRef.current = false;
+      setIsMicMuted(false);
       await loadIceServers();
 
       if (socketRef.current?.connected) {
         socketRef.current.emit('camera-state', { active: true });
-        sendCameraInfo(facingModeRef.current, true, false);
+        sendCameraInfo(facingModeRef.current, true, false, false);
         if (viewerConnectedRef.current) {
           createPeer();
           await maybeOffer();
         } else {
-          setConnectionStatus({ connected: true, text: 'Camera ready · waiting for viewer' });
+          setConnectionStatus({ connected: true, text: 'Camera & mic ready · waiting for viewer' });
         }
       }
     } catch (err) {
       cleanupStream();
       setIsCameraActive(false);
-      sendCameraInfo(facingModeRef.current, false, false);
+      sendCameraInfo(facingModeRef.current, false, false, true);
 
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setErrorMessage('Camera permission was denied. Please allow camera access in your browser settings and try again.');
+        setErrorMessage('Camera/microphone permission was denied. Please allow access in browser settings and try again.');
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        setErrorMessage('No camera hardware was found on this device.');
+        setErrorMessage('No camera or microphone hardware was found on this device.');
       } else if (err.name === 'NotReadableError') {
-        setErrorMessage('The camera is already being used by another app. Please close other camera apps and retry.');
+        setErrorMessage('The camera or microphone is already in use by another app.');
       } else {
-        setErrorMessage(err.message || 'Could not start the camera. Verify browser permissions.');
+        setErrorMessage(err.message || 'Could not start camera. Verify browser permissions.');
       }
     } finally {
       setCameraLoading(false);
@@ -373,7 +410,7 @@ export default function MobileCamera() {
     if (socketRef.current?.connected) {
       socketRef.current.emit('camera-state', { active: false });
       socketRef.current.emit('camera-stopped');
-      sendCameraInfo(facingModeRef.current, false, false);
+      sendCameraInfo(facingModeRef.current, false, false, true);
     }
     closePeer();
     cleanupStream();
@@ -404,17 +441,19 @@ export default function MobileCamera() {
       }
 
       const prev = streamRef.current;
-      streamRef.current = nextStream;
+      const audioTracks = prev?.getAudioTracks() || [];
+      const newCombinedStream = new MediaStream([nextTrack, ...audioTracks]);
+      streamRef.current = newCombinedStream;
       if (videoRef.current) {
-        videoRef.current.srcObject = nextStream;
+        videoRef.current.srcObject = newCombinedStream;
       }
       setFacingMode(nextFacing);
       facingModeRef.current = nextFacing;
       torchActiveRef.current = false;
       setTorchActive(false);
-      prev?.getTracks().forEach((track) => track.stop());
+      prev?.getVideoTracks().forEach((track) => track.stop());
 
-      sendCameraInfo(nextFacing, true, false);
+      sendCameraInfo(nextFacing, true, false, isMicMutedRef.current);
 
       if (!sender && viewerConnectedRef.current) {
         createPeer();
@@ -443,7 +482,7 @@ export default function MobileCamera() {
       });
       torchActiveRef.current = nextTorch;
       setTorchActive(nextTorch);
-      sendCameraInfo(facingModeRef.current, true, nextTorch);
+      sendCameraInfo(facingModeRef.current, true, nextTorch, isMicMutedRef.current);
     } catch (err) {
       console.warn('Torch toggle failed:', err);
     }
@@ -454,6 +493,7 @@ export default function MobileCamera() {
     startCamera: handleStartCamera,
     stopCamera: handleStopCamera,
     toggleTorch: handleToggleTorch,
+    toggleMic: handleToggleMic,
     sendCameraInfo,
   };
 
@@ -515,10 +555,22 @@ export default function MobileCamera() {
             </span>
           </div>
 
-          {/* Facing Mode Pill */}
+          {/* Facing Mode & Mic Pill */}
           {isCameraActive && (
-            <div className="absolute top-3 right-3 z-10 px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900/80 border border-slate-800 text-slate-300 backdrop-blur-md">
-              {facingMode === 'environment' ? 'Rear Camera' : 'Front Camera'}
+            <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5">
+              <div
+                className={`px-2 py-0.5 rounded text-[10px] font-mono border backdrop-blur-md flex items-center gap-1 ${
+                  isMicMuted
+                    ? 'bg-rose-950/80 border-rose-800 text-rose-300'
+                    : 'bg-emerald-950/80 border-emerald-800 text-emerald-300'
+                }`}
+              >
+                {isMicMuted ? <MicOff className="w-3 h-3" /> : <Mic className="w-3 h-3" />}
+                {isMicMuted ? 'Mic Muted' : 'Mic Live'}
+              </div>
+              <div className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900/80 border border-slate-800 text-slate-300 backdrop-blur-md">
+                {facingMode === 'environment' ? 'Rear Camera' : 'Front Camera'}
+              </div>
             </div>
           )}
         </div>
@@ -582,12 +634,12 @@ export default function MobileCamera() {
               {cameraLoading ? (
                 <>
                   <span className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
-                  Requesting camera permission…
+                  Requesting camera & mic…
                 </>
               ) : (
                 <>
                   <Camera className="w-4 h-4" />
-                  Allow camera
+                  Allow camera & mic
                 </>
               )}
             </button>
@@ -595,9 +647,23 @@ export default function MobileCamera() {
             <>
               <button
                 type="button"
+                onClick={handleToggleMic}
+                disabled={isDisconnected}
+                className={`py-3 px-3 rounded-xl font-medium text-xs transition border flex items-center justify-center gap-1.5 ${
+                  isMicMuted
+                    ? 'bg-rose-500/10 border-rose-500/40 text-rose-300 hover:bg-rose-500/20'
+                    : 'bg-slate-800 border-slate-700 text-slate-200 hover:bg-slate-700'
+                }`}
+              >
+                {isMicMuted ? <MicOff className="w-4 h-4 text-rose-400" /> : <Mic className="w-4 h-4 text-emerald-400" />}
+                {isMicMuted ? 'Unmute Mic' : 'Mute Mic'}
+              </button>
+
+              <button
+                type="button"
                 onClick={handleSwitchCamera}
                 disabled={isDisconnected}
-                className="py-3 px-4 rounded-xl font-medium text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 active:scale-[0.99] transition border border-slate-700 flex items-center justify-center gap-2"
+                className="py-3 px-3 rounded-xl font-medium text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 active:scale-[0.99] transition border border-slate-700 flex items-center justify-center gap-1.5"
               >
                 <SwitchCamera className="w-4 h-4 text-sky-400" />
                 Switch camera
@@ -607,10 +673,10 @@ export default function MobileCamera() {
                 type="button"
                 onClick={handleStopCamera}
                 disabled={isDisconnected}
-                className="py-3 px-4 rounded-xl font-medium text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 active:scale-[0.99] transition border border-slate-700 flex items-center justify-center gap-2"
+                className="py-3 px-3 rounded-xl font-medium text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 active:scale-[0.99] transition border border-slate-700 flex items-center justify-center gap-1.5"
               >
                 <CameraOff className="w-4 h-4 text-amber-400" />
-                Stop camera
+                Stop
               </button>
             </>
           )}
