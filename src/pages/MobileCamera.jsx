@@ -40,16 +40,18 @@ export default function MobileCamera() {
   const promptAttemptedRef = useRef(false);
   const controlHandlersRef = useRef({});
 
-  // Parse session and token from URL hash on load
+  // Parse session and token from URL hash, search params, or sessionStorage on load
   useEffect(() => {
-    const params = new URLSearchParams(window.location.hash.slice(1));
-    const sId = params.get('session');
-    const tok = params.get('token');
+    const hashParams = new URLSearchParams(window.location.hash.slice(1));
+    const searchParams = new URLSearchParams(window.location.search);
+    const sId = hashParams.get('session') || searchParams.get('session') || sessionStorage.getItem('fieldlink_mobile_session');
+    const tok = hashParams.get('token') || searchParams.get('token') || sessionStorage.getItem('fieldlink_mobile_token');
 
     if (sId && tok) {
+      sessionStorage.setItem('fieldlink_mobile_session', sId);
+      sessionStorage.setItem('fieldlink_mobile_token', tok);
       setSessionId(sId);
       setToken(tok);
-      window.history.replaceState(null, '', window.location.pathname);
     } else {
       setErrorMessage('This invitation link is incomplete or missing credentials. Please create a new session.');
     }

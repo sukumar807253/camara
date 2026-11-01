@@ -1,6 +1,21 @@
 require("dotenv").config();
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const os = require("node:os");
+
+function getLocalNetworkIp() {
+  try {
+    const nets = os.networkInterfaces();
+    for (const name of Object.keys(nets)) {
+      for (const net of nets[name]) {
+        if (net.family === "IPv4" && !net.internal) {
+          return net.address;
+        }
+      }
+    }
+  } catch {}
+  return null;
+}
 
 const isProduction = process.env.NODE_ENV === "production" || Boolean(process.env.RENDER_EXTERNAL_URL);
 const configuredBaseUrl = process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL;
@@ -96,7 +111,12 @@ app.post("/api/sessions", createLimiter, (req, res) => {
   const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
   const hostHeader = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${port}`;
   const origin = configuredBaseUrl ? new URL(configuredBaseUrl).origin : `${protocol}://${hostHeader}`;
-  const mobileUrl = new URL("/mobile.html", origin);
+  const localIp = getLocalNetworkIp();
+  const mobileOrigin = (localIp && (hostHeader.includes("localhost") || hostHeader.includes("127.0.0.1")))
+    ? `${protocol}://${localIp}:${port}`
+    : origin;
+
+  const mobileUrl = new URL("/mobile.html", mobileOrigin);
   mobileUrl.hash = new URLSearchParams({ session: session.id, token: mobileToken }).toString();
   const viewerUrl = new URL("/viewer.html", origin);
   viewerUrl.hash = new URLSearchParams({ session: session.id, token: viewerToken }).toString();
@@ -105,6 +125,7 @@ app.post("/api/sessions", createLimiter, (req, res) => {
     sessionId: session.id,
     mobileUrl: mobileUrl.toString(),
     viewerUrl: viewerUrl.toString(),
+    localIp,
     expiresAt: session.expiresAt,
     ttlSeconds,
     turnConfigured: hasTurnServer(),

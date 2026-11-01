@@ -47,6 +47,7 @@ export default function LiveViewer() {
 
   const videoRef = useRef(null);
   const stageRef = useRef(null);
+  const remoteStreamRef = useRef(null);
   const socketRef = useRef(null);
   const peerRef = useRef(null);
   const iceServersRef = useRef(null);
@@ -54,16 +55,18 @@ export default function LiveViewer() {
   const statsTimerRef = useRef(null);
   const turnConfiguredRef = useRef(false);
 
-  // Extract credentials from hash on load
+  // Extract credentials from hash, query params, or sessionStorage on load
   useEffect(() => {
-    const params = new URLSearchParams(window.location.hash.slice(1));
-    const sId = params.get('session');
-    const tok = params.get('token');
+    const hashParams = new URLSearchParams(window.location.hash.slice(1));
+    const searchParams = new URLSearchParams(window.location.search);
+    const sId = hashParams.get('session') || searchParams.get('session') || sessionStorage.getItem('fieldlink_viewer_session');
+    const tok = hashParams.get('token') || searchParams.get('token') || sessionStorage.getItem('fieldlink_viewer_token');
 
     if (sId && tok) {
+      sessionStorage.setItem('fieldlink_viewer_session', sId);
+      sessionStorage.setItem('fieldlink_viewer_token', tok);
       setSessionId(sId);
       setToken(tok);
-      window.history.replaceState(null, '', window.location.pathname);
     } else {
       setErrorMessage('This viewer invitation link is incomplete or missing. Please create a new session.');
     }
@@ -223,24 +226,31 @@ export default function LiveViewer() {
     const peer = new RTCPeerConnection({ iceServers: iceServersRef.current });
     peerRef.current = peer;
 
-    peer.ontrack = ({ streams }) => {
-      if (streams[0] && videoRef.current) {
-        videoRef.current.srcObject = streams[0];
+    peer.ontrack = (event) => {
+      console.log('🎥 LiveViewer ontrack event received!', event.streams, event.track);
+      const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+      remoteStreamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.muted = true;
         setIsVideoActive(true);
-        videoRef.current.play().catch(() => {});
+        videoRef.current.play().catch((err) => console.warn('Autoplay error:', err));
       }
     };
 
     peer.onicecandidate = ({ candidate }) => {
       if (candidate && socketRef.current?.connected) {
+        console.log('🧊 LiveViewer sending ICE candidate');
         socketRef.current.emit('ice-candidate', { candidate: candidate.toJSON() });
       }
     };
 
     peer.onconnectionstatechange = () => {
       const state = peer.connectionState;
+      console.log('🔗 LiveViewer connectionState:', state);
       if (state === 'connected') {
         setQualityLabel('Connected · measuring…');
+        setIsVideoActive(true);
         clearInterval(statsTimerRef.current);
         statsTimerRef.current = setInterval(readConnectionStats, 2500);
         readConnectionStats();
@@ -450,6 +460,15 @@ export default function LiveViewer() {
             ref={videoRef}
             autoPlay
             playsInline
+            muted
+            onLoadedMetadata={() => {
+              console.log('🎬 Video onLoadedMetadata, playing...');
+              videoRef.current?.play().catch(() => {});
+            }}
+            onCanPlay={() => {
+              console.log('🎬 Video onCanPlay!');
+              setIsVideoActive(true);
+            }}
             className={`w-full h-full object-contain transition-all duration-300 ${
               isVideoActive ? 'opacity-100' : 'opacity-0'
             } ${isMirrored ? '-scale-x-100' : ''}`}
