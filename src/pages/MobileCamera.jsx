@@ -121,12 +121,14 @@ export default function MobileCamera() {
     });
 
     socket.on('disconnect', () => {
-      viewerConnectedRef.current = false;
-      closePeer();
-      setConnectionStatus({ connected: false, text: 'Signaling disconnected' });
+      if (!isCameraActiveRef.current) {
+        viewerConnectedRef.current = false;
+        closePeer();
+      }
+      setConnectionStatus({ connected: false, text: 'Signaling disconnected · reconnecting…' });
     });
 
-    socket.on('peer-status', (status) => {
+    socket.on('peer-status', async (status) => {
       viewerConnectedRef.current = Boolean(status.viewerConnected);
       if (!status.mobileConnected) return;
 
@@ -134,13 +136,17 @@ export default function MobileCamera() {
         controlHandlersRef.current.sendCameraInfo?.();
       }
 
-      if (streamRef.current && viewerConnectedRef.current) {
-        if (!peerRef.current || peerRef.current.signalingState === 'closed') {
+      if (viewerConnectedRef.current) {
+        const vTrack = streamRef.current?.getVideoTracks()[0];
+        const isDead = !streamRef.current || !vTrack || vTrack.readyState === 'ended' || vTrack.muted || !streamRef.current?.active;
+        if (isCameraActiveRef.current && isDead) {
+          console.log('🔄 Peer-status received with inactive stream, auto-starting camera...');
+          await handleStartCamera();
+        } else if (streamRef.current) {
           createPeer();
+          await maybeOffer();
         }
-        maybeOffer();
       } else if (!viewerConnectedRef.current) {
-        closePeer();
         setConnectionStatus({
           connected: true,
           text: streamRef.current ? 'Camera ready · waiting for viewer' : 'Connected · camera off',
@@ -223,7 +229,7 @@ export default function MobileCamera() {
   };
 
   const createPeer = () => {
-    if (!streamRef.current || !viewerConnectedRef.current || !window.RTCPeerConnection) return null;
+    if (!streamRef.current || !window.RTCPeerConnection) return null;
     closePeer();
 
     const peer = new RTCPeerConnection({ iceServers: iceServersRef.current });
