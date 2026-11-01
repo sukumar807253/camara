@@ -13,7 +13,14 @@ import {
   Clock, 
   AlertTriangle, 
   Info,
-  ShieldCheck
+  ShieldCheck,
+  SwitchCamera,
+  Camera,
+  CameraOff,
+  Zap,
+  FlipHorizontal,
+  Download,
+  X
 } from 'lucide-react';
 
 export default function LiveViewer() {
@@ -21,6 +28,15 @@ export default function LiveViewer() {
   const [token, setToken] = useState('');
   const [isVideoActive, setIsVideoActive] = useState(false);
   const [mobileStatus, setMobileStatus] = useState({ connected: false, cameraActive: false });
+  const [remoteCameraInfo, setRemoteCameraInfo] = useState({
+    facingMode: 'environment', // 'environment' (back) | 'user' (front)
+    torchSupported: false,
+    torchActive: false,
+    cameraActive: false,
+    isSwitching: false,
+  });
+  const [isMirrored, setIsMirrored] = useState(false);
+  const [snapshotUrl, setSnapshotUrl] = useState(null);
   const [qualityLabel, setQualityLabel] = useState('Not connected');
   const [candidateLabel, setCandidateLabel] = useState('Not connected');
   const [expiryLabel, setExpiryLabel] = useState('Checking invitation…');
@@ -99,6 +115,10 @@ export default function LiveViewer() {
         cameraActive: Boolean(status.cameraActive),
       });
 
+      if (status.cameraActive !== undefined) {
+        setRemoteCameraInfo((prev) => ({ ...prev, cameraActive: Boolean(status.cameraActive) }));
+      }
+
       if (status.expiresAt) {
         setExpiryLabel(
           `Expires ${new Date(status.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
@@ -108,6 +128,14 @@ export default function LiveViewer() {
       if (status.mobileConnected && status.cameraActive) {
         socket.emit('request-offer');
       }
+    });
+
+    socket.on('camera-info', (info) => {
+      setRemoteCameraInfo((prev) => ({
+        ...prev,
+        ...info,
+        isSwitching: false,
+      }));
     });
 
     socket.on('offer', handleOffer);
@@ -306,6 +334,58 @@ export default function LiveViewer() {
     }
   };
 
+  const handleRemoteSwitchCamera = () => {
+    if (!socketRef.current?.connected) return;
+    setRemoteCameraInfo((prev) => ({ ...prev, isSwitching: true }));
+    socketRef.current.emit('camera-control', { action: 'switch-camera' });
+    setTimeout(() => {
+      setRemoteCameraInfo((prev) => ({ ...prev, isSwitching: false }));
+    }, 4000);
+  };
+
+  const handleRemoteToggleCamera = () => {
+    if (!socketRef.current?.connected) return;
+    socketRef.current.emit('camera-control', { action: 'toggle-camera' });
+  };
+
+  const handleRemoteToggleTorch = () => {
+    if (!socketRef.current?.connected) return;
+    socketRef.current.emit('camera-control', { action: 'toggle-torch' });
+  };
+
+  const handleCaptureSnapshot = () => {
+    const video = videoRef.current;
+    if (!video || !isVideoActive) return;
+
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || 1280;
+      canvas.height = video.videoHeight || 720;
+      const ctx = canvas.getContext('2d');
+      if (isMirrored) {
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
+      }
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/png');
+      setSnapshotUrl(dataUrl);
+    } catch (err) {
+      console.warn('Failed to capture snapshot:', err);
+    }
+  };
+
+  const handleDownloadSnapshot = () => {
+    if (!snapshotUrl) return;
+    const a = document.createElement('a');
+    a.href = snapshotUrl;
+    a.download = `mobile-camera-${Date.now()}.png`;
+    a.click();
+  };
+
+  const toggleMirror = () => {
+    setIsMirrored((prev) => !prev);
+  };
+
   const handleReconnect = () => {
     setErrorMessage('');
     setIsStopped(false);
@@ -370,9 +450,9 @@ export default function LiveViewer() {
             ref={videoRef}
             autoPlay
             playsInline
-            className={`w-full h-full object-contain transition-opacity duration-300 ${
+            className={`w-full h-full object-contain transition-all duration-300 ${
               isVideoActive ? 'opacity-100' : 'opacity-0'
-            }`}
+            } ${isMirrored ? '-scale-x-100' : ''}`}
           />
 
           {/* Placeholder when stream is inactive */}
@@ -405,6 +485,111 @@ export default function LiveViewer() {
           >
             {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
           </button>
+        </div>
+
+        {/* Remote Mobile Camera Controls Bar */}
+        <div className="mt-4 p-4 sm:p-5 rounded-2xl bg-slate-900/90 border border-sky-900/40 shadow-xl backdrop-blur-md flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-slate-800 border border-slate-700/80 flex items-center justify-center text-sky-400 flex-shrink-0">
+              <Smartphone className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-mono font-semibold text-sky-400 uppercase tracking-wider">
+                  MOBILE CAMERA CONTROLS
+                </span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-slate-800 border border-slate-700 text-slate-300">
+                  {remoteCameraInfo.facingMode === 'user' ? 'FRONT CAMERA' : 'REAR / BACK CAMERA'}
+                </span>
+              </div>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Switch camera orientation, power, or capture photos remotely from this laptop viewer.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5">
+            {/* Switch Camera Button (Front ↔ Back) */}
+            <button
+              type="button"
+              onClick={handleRemoteSwitchCamera}
+              disabled={!mobileStatus.connected || remoteCameraInfo.isSwitching}
+              title="Switch between front (selfie) and back camera"
+              className="py-2.5 px-4 rounded-xl text-xs font-bold text-slate-950 bg-sky-400 hover:bg-sky-300 active:scale-[0.98] transition shadow-[0_0_15px_rgba(56,189,248,0.3)] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              <SwitchCamera className={`w-4 h-4 ${remoteCameraInfo.isSwitching ? 'animate-spin' : ''}`} />
+              <span>
+                {remoteCameraInfo.isSwitching
+                  ? 'Switching…'
+                  : `Switch to ${remoteCameraInfo.facingMode === 'user' ? 'Back' : 'Front'} Camera`}
+              </span>
+            </button>
+
+            {/* Toggle Camera On/Off */}
+            <button
+              type="button"
+              onClick={handleRemoteToggleCamera}
+              disabled={!mobileStatus.connected}
+              title={mobileStatus.cameraActive ? 'Turn Off Phone Camera' : 'Turn On Phone Camera'}
+              className="py-2.5 px-3.5 rounded-xl text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 active:scale-[0.98] transition border border-slate-700 disabled:opacity-40 flex items-center gap-2"
+            >
+              {mobileStatus.cameraActive ? (
+                <>
+                  <CameraOff className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Turn Off Camera</span>
+                </>
+              ) : (
+                <>
+                  <Camera className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Turn On Camera</span>
+                </>
+              )}
+            </button>
+
+            {/* Flashlight / Torch */}
+            {remoteCameraInfo.torchSupported && (
+              <button
+                type="button"
+                onClick={handleRemoteToggleTorch}
+                disabled={!mobileStatus.cameraActive}
+                title="Toggle phone flashlight"
+                className={`py-2.5 px-3.5 rounded-xl text-xs font-semibold transition border flex items-center gap-1.5 ${
+                  remoteCameraInfo.torchActive
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-[0_0_12px_rgba(245,158,11,0.3)]'
+                    : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+                }`}
+              >
+                <Zap className="w-3.5 h-3.5 text-amber-400" />
+                <span>{remoteCameraInfo.torchActive ? 'Torch On' : 'Torch Off'}</span>
+              </button>
+            )}
+
+            {/* Take Snapshot */}
+            <button
+              type="button"
+              onClick={handleCaptureSnapshot}
+              disabled={!isVideoActive}
+              title="Take a photo snapshot from the live stream"
+              className="py-2.5 px-3.5 rounded-xl text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 active:scale-[0.98] transition border border-slate-700 disabled:opacity-40 flex items-center gap-1.5"
+            >
+              <Camera className="w-3.5 h-3.5 text-sky-400" />
+              <span>Take Photo</span>
+            </button>
+
+            {/* Mirror View Toggle */}
+            <button
+              type="button"
+              onClick={toggleMirror}
+              title={isMirrored ? 'Disable video mirror' : 'Mirror video horizontally'}
+              className={`p-2.5 rounded-xl text-xs font-semibold transition border ${
+                isMirrored
+                  ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+              }`}
+            >
+              <FlipHorizontal className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
 
         {/* Quality & Connection Details Grid */}
@@ -477,6 +662,49 @@ export default function LiveViewer() {
             The media stream is end-to-end encrypted (DTLS-SRTP) directly between devices. Restrictive networks require a TURN relay server to route encrypted packets.
           </p>
         </div>
+
+        {/* Snapshot Modal */}
+        {snapshotUrl && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="relative w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                  <Camera className="w-4 h-4 text-sky-400" />
+                  Captured Photo
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setSnapshotUrl(null)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <img
+                src={snapshotUrl}
+                alt="Camera snapshot"
+                className="w-full rounded-xl border border-slate-800 mb-4 object-contain max-h-[60vh] bg-black"
+              />
+              <div className="flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setSnapshotUrl(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-300 hover:bg-slate-800 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadSnapshot}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-950 bg-sky-400 hover:bg-sky-300 transition flex items-center gap-2"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Download Photo
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

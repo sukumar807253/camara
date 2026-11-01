@@ -21,6 +21,9 @@ export default function MobileCamera() {
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraLoading, setCameraLoading] = useState(false);
   const [facingMode, setFacingMode] = useState('environment'); // 'environment' (back) | 'user' (front)
+  const facingModeRef = useRef('environment');
+  const [torchActive, setTorchActive] = useState(false);
+  const torchActiveRef = useRef(false);
   const [connectionStatus, setConnectionStatus] = useState({ connected: false, text: 'Checking invitation…' });
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [errorMessage, setErrorMessage] = useState('');
@@ -35,6 +38,7 @@ export default function MobileCamera() {
   const makingOfferRef = useRef(false);
   const viewerConnectedRef = useRef(false);
   const promptAttemptedRef = useRef(false);
+  const controlHandlersRef = useRef({});
 
   // Parse session and token from URL hash on load
   useEffect(() => {
@@ -112,6 +116,10 @@ export default function MobileCamera() {
       viewerConnectedRef.current = Boolean(status.viewerConnected);
       if (!status.mobileConnected) return;
 
+      if (viewerConnectedRef.current) {
+        controlHandlersRef.current.sendCameraInfo?.();
+      }
+
       if (streamRef.current && viewerConnectedRef.current) {
         if (!peerRef.current || peerRef.current.signalingState === 'closed') {
           createPeer();
@@ -123,6 +131,21 @@ export default function MobileCamera() {
           connected: true,
           text: streamRef.current ? 'Camera ready · waiting for viewer' : 'Connected · camera off',
         });
+      }
+    });
+
+    socket.on('camera-control', async (payload) => {
+      if (!payload?.action) return;
+      if (payload.action === 'switch-camera') {
+        await controlHandlersRef.current.switchCamera?.(payload.facingMode);
+      } else if (payload.action === 'toggle-camera') {
+        if (streamRef.current) {
+          controlHandlersRef.current.stopCamera?.();
+        } else {
+          await controlHandlersRef.current.startCamera?.();
+        }
+      } else if (payload.action === 'toggle-torch') {
+        await controlHandlersRef.current.toggleTorch?.();
       }
     });
 
@@ -273,6 +296,18 @@ export default function MobileCamera() {
     }
   };
 
+  const sendCameraInfo = (fMode = facingModeRef.current, active = Boolean(streamRef.current), torch = torchActiveRef.current) => {
+    if (!socketRef.current?.connected) return;
+    const track = streamRef.current?.getVideoTracks()[0];
+    const capabilities = track?.getCapabilities?.() || {};
+    socketRef.current.emit('camera-info', {
+      facingMode: fMode,
+      cameraActive: active,
+      torchSupported: Boolean(capabilities.torch),
+      torchActive: torch,
+    });
+  };
+
   const handleStartCamera = async () => {
     if (!sessionId || !token) {
       setErrorMessage('This invitation link is incomplete. Create a new session from the dashboard.');
@@ -288,7 +323,7 @@ export default function MobileCamera() {
 
     try {
       const newStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facingMode } },
+        video: { facingMode: { ideal: facingModeRef.current } },
         audio: false,
       });
 
@@ -299,10 +334,13 @@ export default function MobileCamera() {
       }
 
       setIsCameraActive(true);
+      torchActiveRef.current = false;
+      setTorchActive(false);
       await loadIceServers();
 
       if (socketRef.current?.connected) {
         socketRef.current.emit('camera-state', { active: true });
+        sendCameraInfo(facingModeRef.current, true, false);
         if (viewerConnectedRef.current) {
           createPeer();
           await maybeOffer();
@@ -313,6 +351,7 @@ export default function MobileCamera() {
     } catch (err) {
       cleanupStream();
       setIsCameraActive(false);
+      sendCameraInfo(facingModeRef.current, false, false);
 
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
         setErrorMessage('Camera permission was denied. Please allow camera access in your browser settings and try again.');
@@ -332,19 +371,23 @@ export default function MobileCamera() {
     if (socketRef.current?.connected) {
       socketRef.current.emit('camera-state', { active: false });
       socketRef.current.emit('camera-stopped');
+      sendCameraInfo(facingModeRef.current, false, false);
     }
     closePeer();
     cleanupStream();
     setIsCameraActive(false);
+    torchActiveRef.current = false;
+    setTorchActive(false);
     setConnectionStatus({
       connected: Boolean(socketRef.current?.connected),
       text: socketRef.current?.connected ? 'Connected · camera off' : 'Disconnected',
     });
   };
 
-  const handleSwitchCamera = async () => {
-    const nextFacing = facingMode === 'environment' ? 'user' : 'environment';
+  const handleSwitchCamera = async (targetFacing) => {
+    const nextFacing = targetFacing || (facingModeRef.current === 'environment' ? 'user' : 'environment');
     setErrorMessage('');
+    setCameraLoading(true);
 
     try {
       const nextStream = await navigator.mediaDevices.getUserMedia({
@@ -364,14 +407,52 @@ export default function MobileCamera() {
         videoRef.current.srcObject = nextStream;
       }
       setFacingMode(nextFacing);
+      facingModeRef.current = nextFacing;
+      torchActiveRef.current = false;
+      setTorchActive(false);
       prev?.getTracks().forEach((track) => track.stop());
+
+      sendCameraInfo(nextFacing, true, false);
+
+      if (!sender && viewerConnectedRef.current) {
+        createPeer();
+        await maybeOffer();
+      }
     } catch (err) {
       setErrorMessage(
         err.name === 'NotAllowedError'
           ? 'Camera permission is needed to switch cameras.'
           : `Could not switch camera: ${err.message}`
       );
+    } finally {
+      setCameraLoading(false);
     }
+  };
+
+  const handleToggleTorch = async () => {
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track) return;
+    try {
+      const capabilities = track.getCapabilities?.() || {};
+      if (!capabilities.torch) return;
+      const nextTorch = !torchActiveRef.current;
+      await track.applyConstraints({
+        advanced: [{ torch: nextTorch }],
+      });
+      torchActiveRef.current = nextTorch;
+      setTorchActive(nextTorch);
+      sendCameraInfo(facingModeRef.current, true, nextTorch);
+    } catch (err) {
+      console.warn('Torch toggle failed:', err);
+    }
+  };
+
+  controlHandlersRef.current = {
+    switchCamera: handleSwitchCamera,
+    startCamera: handleStartCamera,
+    stopCamera: handleStopCamera,
+    toggleTorch: handleToggleTorch,
+    sendCameraInfo,
   };
 
   const handleDisconnect = () => {

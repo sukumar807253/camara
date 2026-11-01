@@ -102,4 +102,14 @@ test("Socket.IO authenticates roles and relays WebRTC signaling only within a se
   const receivedCandidate = waitForEvent(viewer, "ice-candidate");
   mobile.emit("ice-candidate", { candidate });
   assert.deepEqual(await receivedCandidate, { candidate });
+
+  const cameraControl = { action: "switch-camera" };
+  const receivedControl = waitForEvent(mobile, "camera-control");
+  viewer.emit("camera-control", cameraControl);
+  assert.deepEqual(await receivedControl, cameraControl);
+
+  const cameraInfo = { facingMode: "user", cameraActive: true, torchSupported: false };
+  const receivedInfo = waitForEvent(viewer, "camera-info");
+  mobile.emit("camera-info", cameraInfo);
+  assert.deepEqual(await receivedInfo, cameraInfo);
 });

@@ -149,6 +149,22 @@ function installSignaling(io) {
       io.to(session.mobileSocketId).emit("renegotiate");
     });
 
+    socket.on("camera-control", (payload) => {
+      if (role !== "viewer" || !session.mobileSocketId) return;
+      if (!withinSignalLimit()) return;
+      if (!payload || typeof payload !== "object" || typeof payload.action !== "string") return;
+      touch(session);
+      io.to(session.mobileSocketId).emit("camera-control", payload);
+    });
+
+    socket.on("camera-info", (payload) => {
+      if (role !== "mobile" || !session.viewerSocketId) return;
+      if (!withinSignalLimit()) return;
+      if (!payload || typeof payload !== "object") return;
+      touch(session);
+      io.to(session.viewerSocketId).emit("camera-info", payload);
+    });
+
     socket.on("disconnect", () => {
       if (session[slot] !== socket.id) return;
       session[slot] = null;
