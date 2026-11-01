@@ -133,9 +133,8 @@ app.get("/api/sessions/:sessionId/ice", sessionReadLimiter, requireSessionToken,
 });
 
 const distDir = path.join(__dirname, "../dist");
-const clientDir = fs.existsSync(distDir) ? distDir : path.join(__dirname, "../client");
 
-app.use(express.static(clientDir, {
+app.use(express.static(distDir, {
   index: "index.html",
   maxAge: process.env.NODE_ENV === "production" ? "1h" : 0,
   setHeaders(res, path) {
@@ -144,15 +143,19 @@ app.use(express.static(clientDir, {
 }));
 
 app.get(["/mobile", "/mobile.html"], (req, res) => {
-  const file = path.join(clientDir, "mobile.html");
+  const file = path.join(distDir, "mobile.html");
   if (fs.existsSync(file)) return res.sendFile(file);
-  res.sendFile(path.join(clientDir, "index.html"));
+  const fallback = path.join(distDir, "index.html");
+  if (fs.existsSync(fallback)) return res.sendFile(fallback);
+  res.status(503).send("Frontend not built. Please run 'npm run build'.");
 });
 
 app.get(["/viewer", "/viewer.html"], (req, res) => {
-  const file = path.join(clientDir, "viewer.html");
+  const file = path.join(distDir, "viewer.html");
   if (fs.existsSync(file)) return res.sendFile(file);
-  res.sendFile(path.join(clientDir, "index.html"));
+  const fallback = path.join(distDir, "index.html");
+  if (fs.existsSync(fallback)) return res.sendFile(fallback);
+  res.status(503).send("Frontend not built. Please run 'npm run build'.");
 });
 
 app.use((err, req, res, next) => {

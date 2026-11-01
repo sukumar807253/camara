@@ -9,7 +9,7 @@
     "start": "node server/app.js",
     "dev": "node --watch server/app.js",
     "dev:ui": "vite",
-    "check": "node --check server/app.js && node --check server/signaling.js && node --check server/sessionManager.js && node --check server/middleware/auth.js && node --check server/middleware/security.js && node --check config/iceServers.js && node --check client/js/app.js && node --check client/js/mobile.js && node --check client/js/viewer.js && node --check test/sessionManager.test.js && node --check test/signaling.test.js && node --check test/iceServers.test.js && node --check test/security.test.js",
+    "check": "node --check server/app.js && node --check server/signaling.js && node --check server/sessionManager.js && node --check server/middleware/auth.js && node --check server/middleware/security.js && node --check config/iceServers.js && node --check test/sessionManager.test.js && node --check test/signaling.test.js && node --check test/iceServers.test.js && node --check test/security.test.js",
     "test": "node --test"
   },
   "engines": {
