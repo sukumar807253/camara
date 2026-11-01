@@ -133,6 +133,15 @@ app.get("/api/sessions/:sessionId/ice", sessionReadLimiter, requireSessionToken,
 });
 
 const distDir = path.join(__dirname, "../dist");
+if (!fs.existsSync(path.join(distDir, "index.html"))) {
+  console.log("⚡ Compiling frontend assets (Vite React + Tailwind)...");
+  try {
+    const { execSync } = require("node:child_process");
+    execSync("npm run build", { stdio: "inherit", cwd: path.join(__dirname, "..") });
+  } catch (err) {
+    console.error("⚠️ Failed to auto-compile frontend assets:", err.message);
+  }
+}
 
 app.use(express.static(distDir, {
   index: "index.html",
@@ -141,6 +150,12 @@ app.use(express.static(distDir, {
     if (/\.(html|js|css)$/.test(path)) res.setHeader("Cache-Control", "no-cache");
   },
 }));
+
+app.get("/", (req, res) => {
+  const file = path.join(distDir, "index.html");
+  if (fs.existsSync(file)) return res.sendFile(file);
+  res.status(503).send("Frontend not built. Please run 'npm run build'.");
+});
 
 app.get(["/mobile", "/mobile.html"], (req, res) => {
   const file = path.join(distDir, "mobile.html");

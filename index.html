@@ -7,7 +7,14 @@
     <title>Fieldlink | Private Camera Sessions</title>
   </head>
   <body class="bg-[#0c1015] text-slate-100 min-h-screen">
-    <div id="root" data-view="dashboard"></div>
+    <div id="root" data-view="dashboard">
+      <div style="display:flex;min-height:100vh;align-items:center;justify-content:center;font-family:sans-serif;color:#94a3b8;flex-direction:column;gap:12px;text-align:center;padding:20px;">
+        <div style="width:36px;height:36px;border:3px solid #38bdf8;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite;"></div>
+        <p style="font-size:15px;color:#e2e8f0;margin:0;">Loading Fieldlink...</p>
+        <p style="font-size:12px;color:#64748b;margin:0;">Run <code style="color:#38bdf8;">npm start</code> and open <code style="color:#38bdf8;">http://localhost:3000</code></p>
+        <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+      </div>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
