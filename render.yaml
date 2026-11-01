@@ -2,7 +2,7 @@ services:
   - type: web
     name: device-stream-hub
     runtime: node
-    buildCommand: npm ci
+    buildCommand: npm ci && npm run build
     startCommand: npm start
     healthCheckPath: /healthz
     envVars:

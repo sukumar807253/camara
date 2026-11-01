@@ -1,0 +1,549 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { io } from 'socket.io-client';
+import Header from '../components/Header';
+import StatusDot from '../components/StatusDot';
+import { 
+  Camera, 
+  CameraOff, 
+  SwitchCamera, 
+  PowerOff, 
+  Wifi, 
+  WifiOff, 
+  AlertTriangle, 
+  Info, 
+  ShieldAlert,
+  Radio
+} from 'lucide-react';
+
+export default function MobileCamera() {
+  const [sessionId, setSessionId] = useState('');
+  const [token, setToken] = useState('');
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [cameraLoading, setCameraLoading] = useState(false);
+  const [facingMode, setFacingMode] = useState('environment'); // 'environment' (back) | 'user' (front)
+  const [connectionStatus, setConnectionStatus] = useState({ connected: false, text: 'Checking invitation…' });
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [isDisconnected, setIsDisconnected] = useState(false);
+
+  const videoRef = useRef(null);
+  const socketRef = useRef(null);
+  const peerRef = useRef(null);
+  const streamRef = useRef(null);
+  const iceServersRef = useRef([{ urls: 'stun:stun.l.google.com:19302' }]);
+  const pendingCandidatesRef = useRef([]);
+  const makingOfferRef = useRef(false);
+  const viewerConnectedRef = useRef(false);
+  const promptAttemptedRef = useRef(false);
+
+  // Parse session and token from URL hash on load
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    const sId = params.get('session');
+    const tok = params.get('token');
+
+    if (sId && tok) {
+      setSessionId(sId);
+      setToken(tok);
+      window.history.replaceState(null, '', window.location.pathname);
+    } else {
+      setErrorMessage('This invitation link is incomplete or missing credentials. Please create a new session.');
+    }
+
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    const handlePageHide = () => {
+      cleanupStream();
+      socketRef.current?.disconnect();
+    };
+    window.addEventListener('pagehide', handlePageHide);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('pagehide', handlePageHide);
+      cleanupStream();
+      socketRef.current?.disconnect();
+    };
+  }, []);
+
+  // Connect socket once session and token are available
+  useEffect(() => {
+    if (!sessionId || !token) return;
+
+    const socket = io({
+      auth: { sessionId, token, role: 'mobile' },
+      reconnection: true,
+      reconnectionAttempts: 8,
+      reconnectionDelayMax: 5000,
+    });
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      setConnectionStatus({ connected: true, text: 'Secure signaling connected' });
+      if (streamRef.current) {
+        socket.emit('camera-state', { active: true });
+      } else if (!promptAttemptedRef.current) {
+        promptAttemptedRef.current = true;
+        handleStartCamera();
+      }
+    });
+
+    socket.on('connect_error', (err) => {
+      setConnectionStatus({
+        connected: false,
+        text: err.message === 'unauthorized' ? 'Invitation invalid or expired' : 'Could not connect to signaling',
+      });
+      if (err.message === 'unauthorized') {
+        setErrorMessage('This session invitation is invalid or has expired.');
+      }
+    });
+
+    socket.on('disconnect', () => {
+      viewerConnectedRef.current = false;
+      closePeer();
+      setConnectionStatus({ connected: false, text: 'Signaling disconnected' });
+    });
+
+    socket.on('peer-status', (status) => {
+      viewerConnectedRef.current = Boolean(status.viewerConnected);
+      if (!status.mobileConnected) return;
+
+      if (streamRef.current && viewerConnectedRef.current) {
+        if (!peerRef.current || peerRef.current.signalingState === 'closed') {
+          createPeer();
+        }
+        maybeOffer();
+      } else if (!viewerConnectedRef.current) {
+        closePeer();
+        setConnectionStatus({
+          connected: true,
+          text: streamRef.current ? 'Camera ready · waiting for viewer' : 'Connected · camera off',
+        });
+      }
+    });
+
+    socket.on('answer', async ({ description } = {}) => {
+      if (!peerRef.current || description?.type !== 'answer') return;
+      try {
+        await peerRef.current.setRemoteDescription(description);
+        await applyPendingCandidates();
+      } catch (err) {
+        setErrorMessage(`Could not complete video connection: ${err.message}`);
+      }
+    });
+
+    socket.on('ice-candidate', async ({ candidate } = {}) => {
+      if (!peerRef.current || !candidate) return;
+      if (!peerRef.current.remoteDescription) {
+        pendingCandidatesRef.current.push(candidate);
+      } else {
+        try {
+          await peerRef.current.addIceCandidate(candidate);
+        } catch {
+          // Stale candidate during reconnect
+        }
+      }
+    });
+
+    socket.on('renegotiate', () => {
+      maybeOffer();
+    });
+
+    socket.on('session-expired', () => {
+      handleStopCamera();
+      socket.disconnect();
+      setErrorMessage('This camera session has expired.');
+      setIsDisconnected(true);
+    });
+
+    socket.on('signaling-error', ({ message }) => {
+      setErrorMessage(message || 'Signaling error.');
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [sessionId, token]);
+
+  const loadIceServers = async () => {
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/ice`, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: 'no-store',
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch ICE configuration.');
+      iceServersRef.current = data.iceServers;
+    } catch {
+      // Fallback to default STUN
+    }
+  };
+
+  const createPeer = () => {
+    if (!streamRef.current || !viewerConnectedRef.current || !window.RTCPeerConnection) return null;
+    closePeer();
+
+    const peer = new RTCPeerConnection({ iceServers: iceServersRef.current });
+    peerRef.current = peer;
+
+    streamRef.current.getTracks().forEach((track) => {
+      peer.addTrack(track, streamRef.current);
+    });
+
+    peer.onicecandidate = ({ candidate }) => {
+      if (candidate && socketRef.current?.connected) {
+        socketRef.current.emit('ice-candidate', { candidate: candidate.toJSON() });
+      }
+    };
+
+    peer.onconnectionstatechange = () => {
+      if (peer.connectionState === 'connected') {
+        setConnectionStatus({ connected: true, text: 'Connected to viewer · streaming live' });
+      } else if (['failed', 'disconnected'].includes(peer.connectionState)) {
+        setConnectionStatus({ connected: false, text: 'Viewer connection interrupted' });
+      }
+    };
+
+    peer.oniceconnectionstatechange = () => {
+      if (peer.iceConnectionState === 'failed') {
+        setErrorMessage('Network path failed. Check TURN relay configuration and reconnect.');
+      }
+    };
+
+    return peer;
+  };
+
+  const closePeer = () => {
+    if (peerRef.current) {
+      peerRef.current.onicecandidate = null;
+      peerRef.current.onconnectionstatechange = null;
+      peerRef.current.close();
+      peerRef.current = null;
+    }
+    pendingCandidatesRef.current = [];
+    makingOfferRef.current = false;
+  };
+
+  const maybeOffer = async () => {
+    if (!streamRef.current || !viewerConnectedRef.current || !socketRef.current?.connected || makingOfferRef.current) {
+      return;
+    }
+    if (!peerRef.current || peerRef.current.signalingState === 'closed') {
+      createPeer();
+    }
+    if (!peerRef.current || peerRef.current.signalingState !== 'stable') return;
+
+    makingOfferRef.current = true;
+    try {
+      const offer = await peerRef.current.createOffer();
+      await peerRef.current.setLocalDescription(offer);
+      socketRef.current.emit('offer', { description: peerRef.current.localDescription.toJSON() });
+      setConnectionStatus({ connected: true, text: 'Connecting to viewer…' });
+    } catch (err) {
+      setErrorMessage(`Could not start video connection: ${err.message}`);
+    } finally {
+      makingOfferRef.current = false;
+    }
+  };
+
+  const applyPendingCandidates = async () => {
+    if (!peerRef.current?.remoteDescription) return;
+    const candidates = pendingCandidatesRef.current;
+    pendingCandidatesRef.current = [];
+    for (const cand of candidates) {
+      try {
+        await peerRef.current.addIceCandidate(cand);
+      } catch {
+        // Ignored
+      }
+    }
+  };
+
+  const cleanupStream = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
+
+  const handleStartCamera = async () => {
+    if (!sessionId || !token) {
+      setErrorMessage('This invitation link is incomplete. Create a new session from the dashboard.');
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setErrorMessage('Camera access requires HTTPS and a supported mobile browser.');
+      return;
+    }
+
+    setErrorMessage('');
+    setCameraLoading(true);
+
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facingMode } },
+        audio: false,
+      });
+
+      cleanupStream();
+      streamRef.current = newStream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = newStream;
+      }
+
+      setIsCameraActive(true);
+      await loadIceServers();
+
+      if (socketRef.current?.connected) {
+        socketRef.current.emit('camera-state', { active: true });
+        if (viewerConnectedRef.current) {
+          createPeer();
+          await maybeOffer();
+        } else {
+          setConnectionStatus({ connected: true, text: 'Camera ready · waiting for viewer' });
+        }
+      }
+    } catch (err) {
+      cleanupStream();
+      setIsCameraActive(false);
+
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setErrorMessage('Camera permission was denied. Please allow camera access in your browser settings and try again.');
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        setErrorMessage('No camera hardware was found on this device.');
+      } else if (err.name === 'NotReadableError') {
+        setErrorMessage('The camera is already being used by another app. Please close other camera apps and retry.');
+      } else {
+        setErrorMessage(err.message || 'Could not start the camera. Verify browser permissions.');
+      }
+    } finally {
+      setCameraLoading(false);
+    }
+  };
+
+  const handleStopCamera = () => {
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('camera-state', { active: false });
+      socketRef.current.emit('camera-stopped');
+    }
+    closePeer();
+    cleanupStream();
+    setIsCameraActive(false);
+    setConnectionStatus({
+      connected: Boolean(socketRef.current?.connected),
+      text: socketRef.current?.connected ? 'Connected · camera off' : 'Disconnected',
+    });
+  };
+
+  const handleSwitchCamera = async () => {
+    const nextFacing = facingMode === 'environment' ? 'user' : 'environment';
+    setErrorMessage('');
+
+    try {
+      const nextStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: nextFacing } },
+        audio: false,
+      });
+
+      const nextTrack = nextStream.getVideoTracks()[0];
+      const sender = peerRef.current?.getSenders().find((item) => item.track?.kind === 'video');
+      if (sender) {
+        await sender.replaceTrack(nextTrack);
+      }
+
+      const prev = streamRef.current;
+      streamRef.current = nextStream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = nextStream;
+      }
+      setFacingMode(nextFacing);
+      prev?.getTracks().forEach((track) => track.stop());
+    } catch (err) {
+      setErrorMessage(
+        err.name === 'NotAllowedError'
+          ? 'Camera permission is needed to switch cameras.'
+          : `Could not switch camera: ${err.message}`
+      );
+    }
+  };
+
+  const handleDisconnect = () => {
+    handleStopCamera();
+    socketRef.current?.disconnect();
+    setConnectionStatus({ connected: false, text: 'Session disconnected' });
+    setIsDisconnected(true);
+  };
+
+  return (
+    <div className="min-h-screen bg-[#0c1015] text-slate-100 flex flex-col font-sans">
+      <Header subtitle="PHONE CAMERA" />
+
+      <main className="flex-1 max-w-xl w-full mx-auto px-4 py-6 sm:py-8 flex flex-col">
+        {/* Title */}
+        <div className="mb-5">
+          <p className="text-xs font-mono font-semibold tracking-wider text-sky-400 uppercase">
+            PRIVATE CAMERA SESSION
+          </p>
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-white mt-1">
+            Your phone camera
+          </h1>
+          <p className="text-xs sm:text-sm text-slate-400 mt-1">
+            Camera stays off until you tap "Allow camera". Video streams directly to your paired viewer.
+          </p>
+        </div>
+
+        {/* Video Preview Frame */}
+        <div className="relative w-full aspect-[4/3] sm:aspect-[16/10] bg-slate-950 rounded-2xl border border-slate-800 overflow-hidden shadow-2xl flex items-center justify-center">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className={`w-full h-full object-cover transition-opacity duration-300 ${
+              isCameraActive ? 'opacity-100' : 'opacity-0'
+            } ${facingMode === 'user' ? '-scale-x-100' : ''}`}
+          />
+
+          {/* Off / Placeholder Screen */}
+          {!isCameraActive && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-6 bg-radial from-slate-900/90 to-slate-950">
+              <div className="w-16 h-16 rounded-2xl bg-slate-800/80 border border-slate-700/80 flex items-center justify-center text-slate-400 mb-3 shadow-inner">
+                <CameraOff className="w-8 h-8 text-slate-400" />
+              </div>
+              <strong className="text-sm font-semibold text-slate-200">Camera is off</strong>
+              <span className="text-xs text-slate-400 mt-1 max-w-xs">
+                Live camera preview will appear here after you approve access.
+              </span>
+            </div>
+          )}
+
+          {/* Status Badge */}
+          <div className="absolute top-3 left-3 z-10 flex items-center gap-2 px-2.5 py-1 rounded-md bg-slate-950/80 border border-slate-800/80 text-[11px] font-mono backdrop-blur-md">
+            <StatusDot status={isCameraActive ? 'good' : 'neutral'} pulse={isCameraActive} />
+            <span className="text-slate-200 font-medium tracking-wider">
+              {isCameraActive ? 'LIVE PREVIEW' : 'OFF'}
+            </span>
+          </div>
+
+          {/* Facing Mode Pill */}
+          {isCameraActive && (
+            <div className="absolute top-3 right-3 z-10 px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900/80 border border-slate-800 text-slate-300 backdrop-blur-md">
+              {facingMode === 'environment' ? 'Rear Camera' : 'Front Camera'}
+            </div>
+          )}
+        </div>
+
+        {/* Device Status Cards */}
+        <div className="mt-4 rounded-xl bg-slate-900/70 border border-slate-800 p-3.5 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <Radio className="w-4 h-4 text-sky-400" />
+              <div>
+                <div className="text-xs font-semibold text-slate-200">Session connection</div>
+                <div className="text-[11px] text-slate-400">{connectionStatus.text}</div>
+              </div>
+            </div>
+            <StatusDot status={connectionStatus.connected ? 'good' : 'bad'} />
+          </div>
+
+          <div className="border-t border-slate-800/70 pt-3 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              {isOnline ? (
+                <Wifi className="w-4 h-4 text-emerald-400" />
+              ) : (
+                <WifiOff className="w-4 h-4 text-rose-400" />
+              )}
+              <div>
+                <div className="text-xs font-semibold text-slate-200">Internet connection</div>
+                <div className="text-[11px] text-slate-400">{isOnline ? 'Online' : 'Offline'}</div>
+              </div>
+            </div>
+            <StatusDot status={isOnline ? 'good' : 'bad'} />
+          </div>
+
+          {errorMessage && (
+            <div className="pt-2">
+              <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-400 flex-shrink-0 mt-0.5" />
+                <span>{errorMessage}</span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Consent Note */}
+        <div className="my-4 p-3.5 rounded-xl bg-sky-500/10 border-l-4 border-sky-400 text-xs text-slate-300 flex items-start gap-3">
+          <Info className="w-4 h-4 text-sky-400 flex-shrink-0 mt-0.5" />
+          <p className="leading-relaxed">
+            Your camera is controlled entirely by you. Video is streamed live peer-to-peer and is{' '}
+            <strong className="text-white font-medium">never recorded</strong> or stored on any server.
+          </p>
+        </div>
+
+        {/* Action Controls */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mt-auto">
+          {!isCameraActive ? (
+            <button
+              type="button"
+              onClick={handleStartCamera}
+              disabled={cameraLoading || isDisconnected}
+              className="sm:col-span-3 py-3.5 px-4 rounded-xl font-semibold text-sm text-slate-950 bg-sky-400 hover:bg-sky-300 active:scale-[0.99] transition disabled:opacity-50 flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(56,189,248,0.3)]"
+            >
+              {cameraLoading ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin" />
+                  Requesting camera permission…
+                </>
+              ) : (
+                <>
+                  <Camera className="w-4 h-4" />
+                  Allow camera
+                </>
+              )}
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={handleSwitchCamera}
+                disabled={isDisconnected}
+                className="py-3 px-4 rounded-xl font-medium text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 active:scale-[0.99] transition border border-slate-700 flex items-center justify-center gap-2"
+              >
+                <SwitchCamera className="w-4 h-4 text-sky-400" />
+                Switch camera
+              </button>
+
+              <button
+                type="button"
+                onClick={handleStopCamera}
+                disabled={isDisconnected}
+                className="py-3 px-4 rounded-xl font-medium text-xs text-slate-200 bg-slate-800 hover:bg-slate-700 active:scale-[0.99] transition border border-slate-700 flex items-center justify-center gap-2"
+              >
+                <CameraOff className="w-4 h-4 text-amber-400" />
+                Stop camera
+              </button>
+            </>
+          )}
+        </div>
+
+        {/* Disconnect Button */}
+        <button
+          type="button"
+          onClick={handleDisconnect}
+          disabled={isDisconnected}
+          className="mt-3 w-full py-2.5 px-4 rounded-xl text-xs font-medium text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition border border-transparent hover:border-rose-500/20 disabled:opacity-40 flex items-center justify-center gap-1.5"
+        >
+          <PowerOff className="w-3.5 h-3.5" />
+          {isDisconnected ? 'Session Disconnected' : 'Disconnect session'}
+        </button>
+      </main>
+    </div>
+  );
+}

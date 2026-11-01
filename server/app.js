@@ -1,5 +1,6 @@
 require("dotenv").config();
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 
 const isProduction = process.env.NODE_ENV === "production" || Boolean(process.env.RENDER_EXTERNAL_URL);
 const configuredBaseUrl = process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL;
@@ -52,7 +53,7 @@ app.use(helmet({
     directives: {
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'"],
-      styleSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", "data:"],
       connectSrc: ["'self'", "ws:", "wss:"],
       mediaSrc: ["'self'", "blob:"],
@@ -131,13 +132,28 @@ app.get("/api/sessions/:sessionId/ice", sessionReadLimiter, requireSessionToken,
   });
 });
 
-app.use(express.static(path.join(__dirname, "../client"), {
+const distDir = path.join(__dirname, "../dist");
+const clientDir = fs.existsSync(distDir) ? distDir : path.join(__dirname, "../client");
+
+app.use(express.static(clientDir, {
   index: "index.html",
   maxAge: process.env.NODE_ENV === "production" ? "1h" : 0,
   setHeaders(res, path) {
     if (/\.(html|js|css)$/.test(path)) res.setHeader("Cache-Control", "no-cache");
   },
 }));
+
+app.get(["/mobile", "/mobile.html"], (req, res) => {
+  const file = path.join(clientDir, "mobile.html");
+  if (fs.existsSync(file)) return res.sendFile(file);
+  res.sendFile(path.join(clientDir, "index.html"));
+});
+
+app.get(["/viewer", "/viewer.html"], (req, res) => {
+  const file = path.join(clientDir, "viewer.html");
+  if (fs.existsSync(file)) return res.sendFile(file);
+  res.sendFile(path.join(clientDir, "index.html"));
+});
 
 app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
