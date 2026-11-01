@@ -14,14 +14,20 @@ import {
   ShieldAlert,
   Radio,
   Mic,
-  MicOff
+  MicOff,
+  PictureInPicture,
+  Sun
 } from 'lucide-react';
 
 export default function MobileCamera() {
   const [sessionId, setSessionId] = useState('');
   const [token, setToken] = useState('');
   const [isCameraActive, setIsCameraActive] = useState(false);
+  const isCameraActiveRef = useRef(false);
   const [cameraLoading, setCameraLoading] = useState(false);
+  const [isWakeLockActive, setIsWakeLockActive] = useState(false);
+  const [isPipActive, setIsPipActive] = useState(false);
+  const wakeLockRef = useRef(null);
   const [facingMode, setFacingMode] = useState('environment'); // 'environment' (back) | 'user' (front)
   const facingModeRef = useRef('environment');
   const [torchActive, setTorchActive] = useState(false);
@@ -66,8 +72,8 @@ export default function MobileCamera() {
     window.addEventListener('offline', handleOffline);
 
     const handlePageHide = () => {
-      cleanupStream();
-      socketRef.current?.disconnect();
+      // Release wake lock when backgrounded, but preserve stream & socket so it can resume
+      releaseWakeLock();
     };
     window.addEventListener('pagehide', handlePageHide);
 
@@ -75,6 +81,7 @@ export default function MobileCamera() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('pagehide', handlePageHide);
+      releaseWakeLock();
       cleanupStream();
       socketRef.current?.disconnect();
     };
@@ -294,6 +301,46 @@ export default function MobileCamera() {
     }
   };
 
+  const requestWakeLock = async () => {
+    try {
+      if ('wakeLock' in navigator && (!wakeLockRef.current || wakeLockRef.current.released)) {
+        const lock = await navigator.wakeLock.request('screen');
+        wakeLockRef.current = lock;
+        setIsWakeLockActive(true);
+        lock.addEventListener('release', () => {
+          wakeLockRef.current = null;
+          setIsWakeLockActive(false);
+        });
+        console.log('💡 Screen Wake Lock active - screen will not sleep');
+      }
+    } catch (err) {
+      console.warn('Wake Lock request warning:', err);
+    }
+  };
+
+  const releaseWakeLock = () => {
+    if (wakeLockRef.current) {
+      wakeLockRef.current.release().catch(() => {});
+      wakeLockRef.current = null;
+      setIsWakeLockActive(false);
+    }
+  };
+
+  const togglePictureInPicture = async () => {
+    try {
+      if (!videoRef.current) return;
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+        setIsPipActive(false);
+      } else if (document.pictureInPictureEnabled) {
+        await videoRef.current.requestPictureInPicture();
+        setIsPipActive(true);
+      }
+    } catch (err) {
+      console.warn('PiP error:', err);
+    }
+  };
+
   const cleanupStream = () => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
@@ -371,6 +418,8 @@ export default function MobileCamera() {
       }
 
       setIsCameraActive(true);
+      isCameraActiveRef.current = true;
+      await requestWakeLock();
       torchActiveRef.current = false;
       setTorchActive(false);
       isMicMutedRef.current = false;
@@ -390,6 +439,8 @@ export default function MobileCamera() {
     } catch (err) {
       cleanupStream();
       setIsCameraActive(false);
+      isCameraActiveRef.current = false;
+      releaseWakeLock();
       sendCameraInfo(facingModeRef.current, false, false, true);
 
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
@@ -415,6 +466,11 @@ export default function MobileCamera() {
     closePeer();
     cleanupStream();
     setIsCameraActive(false);
+    isCameraActiveRef.current = false;
+    releaseWakeLock();
+    if (document.pictureInPictureElement) {
+      document.exitPictureInPicture().catch(() => {});
+    }
     torchActiveRef.current = false;
     setTorchActive(false);
     setConnectionStatus({
@@ -488,6 +544,49 @@ export default function MobileCamera() {
     }
   };
 
+  // Handle visibility changes and automatic recovery when returning to tab
+  useEffect(() => {
+    const handleVisibilityChange = async () => {
+      if (document.visibilityState === 'visible') {
+        console.log('👁️ Mobile page resumed / visible');
+        // 1. Re-acquire screen wake lock if camera should be active
+        if (isCameraActiveRef.current) {
+          await requestWakeLock();
+        }
+
+        // 2. Reconnect signaling socket if dropped in background
+        if (socketRef.current && !socketRef.current.connected) {
+          console.log('🔄 Reconnecting signaling socket...');
+          socketRef.current.connect();
+        }
+
+        // 3. Check if camera track was stopped or muted by mobile OS in background
+        const vTrack = streamRef.current?.getVideoTracks()[0];
+        const isTrackDead = !vTrack || vTrack.readyState === 'ended';
+
+        if (isCameraActiveRef.current && isTrackDead) {
+          console.log('🔄 Camera track ended while in background, auto-restarting...');
+          await handleStartCamera();
+        } else if (isCameraActiveRef.current && streamRef.current && viewerConnectedRef.current) {
+          // If WebRTC connection was interrupted in background, renegotiate offer
+          if (!peerRef.current || ['failed', 'disconnected', 'closed'].includes(peerRef.current.connectionState)) {
+            console.log('🔄 Re-establishing WebRTC connection with viewer...');
+            createPeer();
+            await maybeOffer();
+          }
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleVisibilityChange);
+    };
+  }, []);
+
   controlHandlersRef.current = {
     switchCamera: handleSwitchCamera,
     startCamera: handleStartCamera,
@@ -529,6 +628,8 @@ export default function MobileCamera() {
             autoPlay
             playsInline
             muted
+            onEnterPictureInPicture={() => setIsPipActive(true)}
+            onLeavePictureInPicture={() => setIsPipActive(false)}
             className={`w-full h-full object-cover transition-opacity duration-300 ${
               isCameraActive ? 'opacity-100' : 'opacity-0'
             } ${facingMode === 'user' ? '-scale-x-100' : ''}`}
@@ -555,9 +656,37 @@ export default function MobileCamera() {
             </span>
           </div>
 
-          {/* Facing Mode & Mic Pill */}
+          {/* Facing Mode, Wake Lock & PiP */}
           {isCameraActive && (
             <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5">
+              {/* Screen Awake (Wake Lock) Indicator */}
+              {isWakeLockActive && (
+                <div
+                  title="Screen is kept awake so stream will not sleep"
+                  className="px-2 py-0.5 rounded text-[10px] font-mono border backdrop-blur-md flex items-center gap-1 bg-amber-950/80 border-amber-800 text-amber-300"
+                >
+                  <Sun className="w-3 h-3 text-amber-400" />
+                  <span className="hidden sm:inline">Awake</span>
+                </div>
+              )}
+
+              {/* Picture-in-Picture Button */}
+              {typeof document !== 'undefined' && document.pictureInPictureEnabled && (
+                <button
+                  type="button"
+                  onClick={togglePictureInPicture}
+                  title={isPipActive ? 'Exit Picture-in-Picture' : 'Keep streaming in a mini floating window while using other apps'}
+                  className={`px-2 py-0.5 rounded text-[10px] font-mono border backdrop-blur-md transition flex items-center gap-1 ${
+                    isPipActive
+                      ? 'bg-sky-500/30 border-sky-400 text-sky-200'
+                      : 'bg-slate-900/80 border-slate-800 text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <PictureInPicture className="w-3 h-3 text-sky-400" />
+                  <span>{isPipActive ? 'In PiP' : 'PiP'}</span>
+                </button>
+              )}
+
               <div
                 className={`px-2 py-0.5 rounded text-[10px] font-mono border backdrop-blur-md flex items-center gap-1 ${
                   isMicMuted
@@ -568,8 +697,9 @@ export default function MobileCamera() {
                 {isMicMuted ? <MicOff className="w-3 h-3" /> : <Mic className="w-3 h-3" />}
                 {isMicMuted ? 'Mic Muted' : 'Mic Live'}
               </div>
+
               <div className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-900/80 border border-slate-800 text-slate-300 backdrop-blur-md">
-                {facingMode === 'environment' ? 'Rear Camera' : 'Front Camera'}
+                {facingMode === 'environment' ? 'Rear' : 'Front'}
               </div>
             </div>
           )}
@@ -613,12 +743,16 @@ export default function MobileCamera() {
           )}
         </div>
 
-        {/* Consent Note */}
-        <div className="my-4 p-3.5 rounded-xl bg-sky-500/10 border-l-4 border-sky-400 text-xs text-slate-300 flex items-start gap-3">
-          <Info className="w-4 h-4 text-sky-400 flex-shrink-0 mt-0.5" />
-          <p className="leading-relaxed">
-            Your camera is controlled entirely by you. Video is streamed live peer-to-peer and is{' '}
-            <strong className="text-white font-medium">never recorded</strong> or stored on any server.
+        {/* Keep-Alive & Consent Note */}
+        <div className="my-4 p-3.5 rounded-xl bg-sky-500/10 border-l-4 border-sky-400 text-xs text-slate-300 space-y-2">
+          <div className="flex items-start gap-2.5">
+            <Info className="w-4 h-4 text-sky-400 flex-shrink-0 mt-0.5" />
+            <p className="leading-relaxed">
+              <strong className="text-white font-medium">Keep-Alive Active:</strong> Screen Wake Lock keeps your phone screen on so streaming doesn't sleep or disconnect.
+            </p>
+          </div>
+          <p className="text-[11px] text-slate-400 pl-6.5 leading-relaxed">
+            💡 <em>Tip:</em> To use other apps on this phone while streaming, tap the <strong>PiP</strong> button on the video preview to keep streaming in a floating mini-window.
           </p>
         </div>
 
