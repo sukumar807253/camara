@@ -94,8 +94,9 @@ export default function MobileCamera() {
     const socket = io({
       auth: { sessionId, token, role: 'mobile' },
       reconnection: true,
-      reconnectionAttempts: 8,
-      reconnectionDelayMax: 5000,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 3000,
     });
     socketRef.current = socket;
 
@@ -544,11 +545,11 @@ export default function MobileCamera() {
     }
   };
 
-  // Handle visibility changes and automatic recovery when returning to tab
+  // Handle visibility changes, screen wake, and automatic recovery when returning to tab
   useEffect(() => {
-    const handleVisibilityChange = async () => {
+    const handleWakeup = async () => {
       if (document.visibilityState === 'visible') {
-        console.log('👁️ Mobile page resumed / visible');
+        console.log('👁️ Mobile page resumed / screen turned on');
         // 1. Re-acquire screen wake lock if camera should be active
         if (isCameraActiveRef.current) {
           await requestWakeLock();
@@ -560,17 +561,19 @@ export default function MobileCamera() {
           socketRef.current.connect();
         }
 
-        // 3. Check if camera track was stopped or muted by mobile OS in background
+        // 3. Check if camera track was stopped or muted by mobile OS when screen cut off
         const vTrack = streamRef.current?.getVideoTracks()[0];
-        const isTrackDead = !vTrack || vTrack.readyState === 'ended';
+        const isTrackUnusable = !vTrack || vTrack.readyState === 'ended' || vTrack.muted || !streamRef.current?.active;
 
-        if (isCameraActiveRef.current && isTrackDead) {
-          console.log('🔄 Camera track ended while in background, auto-restarting...');
+        if (isCameraActiveRef.current && isTrackUnusable) {
+          console.log('🔄 Camera track inactive after screen cut, auto-restarting camera...');
           await handleStartCamera();
-        } else if (isCameraActiveRef.current && streamRef.current && viewerConnectedRef.current) {
-          // If WebRTC connection was interrupted in background, renegotiate offer
-          if (!peerRef.current || ['failed', 'disconnected', 'closed'].includes(peerRef.current.connectionState)) {
-            console.log('🔄 Re-establishing WebRTC connection with viewer...');
+        } else if (isCameraActiveRef.current && streamRef.current) {
+          if (videoRef.current && videoRef.current.paused) {
+            videoRef.current.play().catch(() => {});
+          }
+          if (viewerConnectedRef.current) {
+            console.log('🔄 Re-establishing WebRTC offer to viewer after wakeup...');
             createPeer();
             await maybeOffer();
           }
@@ -578,12 +581,27 @@ export default function MobileCamera() {
       }
     };
 
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('focus', handleVisibilityChange);
+    document.addEventListener('visibilitychange', handleWakeup);
+    window.addEventListener('focus', handleWakeup);
+    window.addEventListener('pageshow', handleWakeup);
+
+    // Safety health check every 4 seconds when tab is active:
+    // If user intended camera to be on, but OS muted or ended track, automatically recover!
+    const healthTimer = setInterval(() => {
+      if (document.visibilityState === 'visible' && isCameraActiveRef.current) {
+        const vTrack = streamRef.current?.getVideoTracks()[0];
+        if (!vTrack || vTrack.readyState === 'ended' || vTrack.muted || !streamRef.current?.active) {
+          console.log('❤️ Health check recovering inactive stream...');
+          handleStartCamera();
+        }
+      }
+    }, 4000);
 
     return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('focus', handleVisibilityChange);
+      document.removeEventListener('visibilitychange', handleWakeup);
+      window.removeEventListener('focus', handleWakeup);
+      window.removeEventListener('pageshow', handleWakeup);
+      clearInterval(healthTimer);
     };
   }, []);
 

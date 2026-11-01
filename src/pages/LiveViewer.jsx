@@ -97,8 +97,9 @@ export default function LiveViewer() {
     const socket = io({
       auth: { sessionId, token, role: 'viewer' },
       reconnection: true,
-      reconnectionAttempts: 8,
-      reconnectionDelayMax: 5000,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 3000,
     });
     socketRef.current = socket;
 
@@ -135,7 +136,7 @@ export default function LiveViewer() {
         );
       }
 
-      if (status.mobileConnected && status.cameraActive) {
+      if (status.mobileConnected) {
         socket.emit('request-offer');
       }
     });
@@ -539,11 +540,16 @@ export default function LiveViewer() {
             </span>
           </div>
 
-          {/* Background / Reconnecting banner if mobile disconnected briefly */}
+          {/* Background / Screen Off Overlay */}
           {isVideoActive && !mobileStatus.connected && (
-            <div className="absolute top-14 left-4 z-20 px-3 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-medium backdrop-blur-md flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-              <span>Phone temporarily in background · waiting to resume…</span>
+            <div className="absolute inset-0 bg-slate-950/75 backdrop-blur-[2px] flex flex-col items-center justify-center text-center p-6 z-20 transition-all duration-300">
+              <div className="w-12 h-12 rounded-2xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 mb-3 shadow-lg">
+                <Smartphone className="w-6 h-6 animate-pulse" />
+              </div>
+              <strong className="text-sm font-semibold text-amber-200">Phone screen is off or app minimized</strong>
+              <span className="text-xs text-slate-300 mt-1 max-w-sm">
+                Live stream will automatically resume as soon as the phone screen is turned on or reopened.
+              </span>
             </div>
           )}
 

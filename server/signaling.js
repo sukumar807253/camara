@@ -68,12 +68,6 @@ function installSignaling(io) {
       io.sockets.sockets.get(previousSocketId)?.disconnect(true);
     }
 
-    if (!session.disconnectTimers) session.disconnectTimers = {};
-    if (session.disconnectTimers[role]) {
-      clearTimeout(session.disconnectTimers[role]);
-      session.disconnectTimers[role] = null;
-    }
-
     session[slot] = socket.id;
     touch(session);
     socket.join(session.id);
@@ -143,10 +137,6 @@ function installSignaling(io) {
     socket.on("camera-stopped", () => {
       if (role !== "mobile") return;
       if (!withinSignalLimit()) return;
-      if (session.disconnectTimers?.mobile) {
-        clearTimeout(session.disconnectTimers.mobile);
-        session.disconnectTimers.mobile = null;
-      }
       session.cameraActive = false;
       touch(session);
       io.to(session.id).emit("camera-stopped");
@@ -186,27 +176,8 @@ function installSignaling(io) {
         cameraActive: session.cameraActive,
         expiresAt: session.expiresAt,
       });
-
-      if (role === "mobile") {
-        // 12-second grace period before marking camera dead and tearing down peer,
-        // allowing mobile to switch apps, pull down notifications, or recover briefly
-        if (!session.disconnectTimers) session.disconnectTimers = {};
-        if (session.disconnectTimers.mobile) clearTimeout(session.disconnectTimers.mobile);
-
-        session.disconnectTimers.mobile = setTimeout(() => {
-          if (!session.mobileSocketId) {
-            session.cameraActive = false;
-            io.to(session.id).emit("peer-status", {
-              mobileConnected: false,
-              viewerConnected: Boolean(session.viewerSocketId),
-              cameraActive: false,
-              expiresAt: session.expiresAt,
-            });
-            io.to(session.id).emit("camera-stopped");
-          }
-          if (session.disconnectTimers) session.disconnectTimers.mobile = null;
-        }, 12000);
-      }
+      // Do NOT kill camera or emit camera-stopped on disconnect.
+      // Keeps session ready indefinitely so stream resumes whenever mobile screen turns back on.
     });
   });
 }
